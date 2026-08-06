@@ -6,9 +6,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 
-# -------------------------------------------------
 # SETUP
-# -------------------------------------------------
 
 load_dotenv()
 
@@ -27,9 +25,7 @@ if not api_key:
 client = OpenAI(api_key=api_key)
 
 
-# -------------------------------------------------
 # HELPER FUNCTIONS
-# -------------------------------------------------
 
 def extract_text_from_pdf(file):
     reader = PdfReader(file)
@@ -150,9 +146,7 @@ QUESTION:
     return ask_ai(instructions, prompt)
 
 
-# -------------------------------------------------
 # SESSION STATE
-# -------------------------------------------------
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -167,9 +161,8 @@ if "quiz" not in st.session_state:
     st.session_state.quiz = ""
 
 
-# -------------------------------------------------
+
 # HEADER
-# -------------------------------------------------
 
 st.title("🧠 CognifyAI")
 
@@ -183,9 +176,7 @@ st.write(
 st.divider()
 
 
-# -------------------------------------------------
 # SIDEBAR
-# -------------------------------------------------
 
 with st.sidebar:
 
@@ -209,9 +200,7 @@ with st.sidebar:
         st.rerun()
 
 
-# -------------------------------------------------
 # PDF PROCESSING
-# -------------------------------------------------
 
 if uploaded_file is not None:
 
@@ -228,9 +217,7 @@ if uploaded_file is not None:
     )
 
 
-# -------------------------------------------------
 # NO DOCUMENT
-# -------------------------------------------------
 
 if not st.session_state.document_text:
 
@@ -254,9 +241,7 @@ Ask questions directly about your uploaded material.
     st.stop()
 
 
-# -------------------------------------------------
 # MAIN APP TABS
-# -------------------------------------------------
 
 summary_tab, quiz_tab, chat_tab, document_tab = st.tabs(
     [
@@ -268,9 +253,7 @@ summary_tab, quiz_tab, chat_tab, document_tab = st.tabs(
 )
 
 
-# -------------------------------------------------
 # SUMMARY TAB
-# -------------------------------------------------
 
 with summary_tab:
 
@@ -296,9 +279,7 @@ with summary_tab:
         st.markdown(st.session_state.summary)
 
 
-# -------------------------------------------------
 # QUIZ TAB
-# -------------------------------------------------
 
 with quiz_tab:
 
@@ -328,9 +309,7 @@ with quiz_tab:
         st.markdown(st.session_state.quiz)
 
 
-# -------------------------------------------------
 # CHAT TAB
-# -------------------------------------------------
 
 with chat_tab:
 
@@ -382,9 +361,7 @@ with chat_tab:
         )
 
 
-# -------------------------------------------------
 # DOCUMENT TAB
-# -------------------------------------------------
 
 with document_tab:
 
