@@ -1,14 +1,9 @@
-import os
-
 import streamlit as st
-from dotenv import load_dotenv
-from openai import OpenAI
 from pypdf import PdfReader
+import ollama
 
 
-# SETUP
-
-load_dotenv()
+# APP CONFIGURATION
 
 st.set_page_config(
     page_title="CognifyAI",
@@ -16,161 +11,152 @@ st.set_page_config(
     layout="wide"
 )
 
-api_key = os.getenv("OPENAI_API_KEY")
 
-if not api_key:
-    st.error("OPENAI_API_KEY is missing. Add it to your .env file.")
-    st.stop()
+# AI CONFIGURATION
 
-client = OpenAI(api_key=api_key)
+MODEL_NAME = "qwen3:1.7b"
+
+def ask_ai(system_prompt, user_prompt):
+    try:
+        response = ollama.chat(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            think=False
+        )
+
+        return response["message"]["content"]
+
+    except Exception as error:
+        st.error(f"Ollama error: {error}")
+        return None
 
 
-# HELPER FUNCTIONS
+# PDF PROCESSING
 
 def extract_text_from_pdf(file):
+    """
+    Extract text from every readable page of an uploaded PDF.
+    """
+
     reader = PdfReader(file)
 
-    text = ""
+    pages = []
 
-    for page_number, page in enumerate(reader.pages):
-        page_text = page.extract_text()
+    for page_number, page in enumerate(reader.pages, start=1):
 
-        if page_text:
-            text += f"\n\n--- Page {page_number + 1} ---\n\n"
-            text += page_text
+        text = page.extract_text()
 
-    return text
+        if text:
+            pages.append(
+                f"\n--- Page {page_number} ---\n{text}"
+            )
+
+    return "\n".join(pages)
 
 
-def limit_text(text, max_characters=50000):
+def limit_document_size(text, max_characters=5000):
     """
-    Prevent extremely large PDFs from being sent to the API.
-    We can replace this later with proper chunking/RAG.
+    Prevent extremely large documents from being sent
+    directly to the local model.
+
+    Proper RAG would replace this in a future version.
     """
+
     if len(text) > max_characters:
         return text[:max_characters]
 
     return text
 
 
-def ask_ai(instructions, user_message):
-    try:
-        response = client.responses.create(
-            model="gpt-5-mini",
-            instructions=instructions,
-            input=user_message
-        )
+# AI FEATURES
 
-        return response.output_text
+# AI FEATURES
 
-    except Exception as error:
-
-        error_message = str(error)
-
-        if "credit_balance_exhausted" in error_message:
-            return (
-                "⚠️ The cloud AI service is currently unavailable. "
-                "Switch to the local AI provider or try again later."
-            )
-
-        if "invalid_api_key" in error_message:
-            return (
-                "⚠️ The AI service could not authenticate. "
-                "Please check the API configuration."
-            )
-
-        return (
-            "⚠️ CognifyAI couldn't complete the request right now. "
-            "Please try again."
-        )
-
-
-def generate_summary(document_text):
-    instructions = """
+def generate_summary(document):
+    system_prompt = """
 You are CognifyAI, an AI study assistant.
 
-Summarize educational material clearly and accurately.
-
-Your summary should:
-- identify the major ideas
-- explain important concepts simply
-- include important definitions
-- preserve important formulas or facts
-- use headings and bullet points where appropriate
-- avoid adding information that is not present in the document
-"""
-
-    prompt = f"""
-Summarize the following study material.
-
-DOCUMENT:
-
-{document_text}
-"""
-
-    return ask_ai(instructions, prompt)
-
-
-def generate_quiz(document_text, number_of_questions=5):
-    instructions = """
-You are CognifyAI, an AI study assistant.
-
-Create a useful university-level quiz using ONLY the provided document.
-
-For every question:
-1. Give the question
-2. Give four options: A, B, C, D
-3. Give the correct answer
-4. Give a short explanation
-
-Make the questions test understanding rather than simple memorization.
-"""
-
-    prompt = f"""
-Create {number_of_questions} multiple-choice questions from this document.
-
-DOCUMENT:
-
-{document_text}
-"""
-
-    return ask_ai(instructions, prompt)
-
-
-def answer_document_question(document_text, question):
-    instructions = """
-You are CognifyAI, an AI study assistant.
-
-Answer questions using the supplied study material.
+Summarize the provided study material briefly.
 
 Rules:
-- Base the answer primarily on the supplied document.
-- Explain the answer clearly.
-- If the answer is not contained in the document, say that the document
-  does not provide enough information.
-- Do not pretend information exists in the document when it does not.
+- Use only information from the document.
+- Focus on the 5 most important points.
+- Keep the answer concise.
+- Use bullet points.
+- Do not invent information.
 """
 
-    prompt = f"""
+    user_prompt = f"""
+Summarize this study material:
+
 DOCUMENT:
 
-{document_text}
+{document}
+"""
+
+    return ask_ai(system_prompt, user_prompt)
+
+
+def generate_quiz(document, question_count):
+    system_prompt = """
+You are CognifyAI, an AI study assistant.
+
+Create a short multiple-choice quiz using only the provided document.
+
+For each question provide:
+- Question
+- Four choices: A, B, C, D
+- Correct answer
+- Short explanation
+"""
+
+    user_prompt = f"""
+Create {question_count} multiple-choice questions.
+
+DOCUMENT:
+
+{document}
+"""
+
+    return ask_ai(system_prompt, user_prompt)
+
+
+def answer_question(document, question):
+    system_prompt = """
+You are CognifyAI, a document question-answering assistant.
+
+Answer using only the provided document.
+
+Keep the answer concise.
+If the document does not contain the answer, say so.
+"""
+
+    user_prompt = f"""
+DOCUMENT:
+
+{document}
 
 QUESTION:
 
 {question}
 """
 
-    return ask_ai(instructions, prompt)
+    return ask_ai(system_prompt, user_prompt)
 
 
 # SESSION STATE
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "document_text" not in st.session_state:
-    st.session_state.document_text = ""
+if "document" not in st.session_state:
+    st.session_state.document = ""
 
 if "summary" not in st.session_state:
     st.session_state.summary = ""
@@ -178,170 +164,218 @@ if "summary" not in st.session_state:
 if "quiz" not in st.session_state:
     st.session_state.quiz = ""
 
-
-
-# HEADER
-
-st.title("🧠 CognifyAI")
-
-st.subheader("Your AI-powered study assistant")
-
-st.write(
-    "Upload course material, generate summaries and quizzes, "
-    "and ask questions about your notes."
-)
-
-st.divider()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 
 # SIDEBAR
 
 with st.sidebar:
 
-    st.header("CognifyAI")
+    st.title("🧠 CognifyAI")
 
-    st.write("Study smarter with your own course material.")
+    st.caption("Local AI study assistant")
 
     st.divider()
 
     uploaded_file = st.file_uploader(
-        "Upload a PDF",
+        "Upload course material",
         type=["pdf"]
     )
 
-    if st.button("Clear Session"):
-        st.session_state.messages = []
-        st.session_state.document_text = ""
+    if uploaded_file:
+
+        with st.spinner("Reading document..."):
+
+            extracted_text = extract_text_from_pdf(
+                uploaded_file
+            )
+
+            st.session_state.document = limit_document_size(
+                extracted_text
+            )
+
+        st.success(f"Loaded {uploaded_file.name}")
+
+        st.caption(
+            f"{len(st.session_state.document):,} characters processed"
+        )
+
+    st.divider()
+
+    st.caption(f"AI Model: {MODEL_NAME}")
+    st.caption("Runs locally with Ollama")
+
+    if st.button("Clear session"):
+
+        st.session_state.document = ""
         st.session_state.summary = ""
         st.session_state.quiz = ""
+        st.session_state.messages = []
 
         st.rerun()
 
 
-# PDF PROCESSING
+# HEADER
 
-if uploaded_file is not None:
+st.title("🧠 CognifyAI")
 
-    with st.spinner("Reading PDF..."):
+st.subheader(
+    "Turn your course material into summaries, quizzes and answers."
+)
 
-        extracted_text = extract_text_from_pdf(uploaded_file)
+st.caption(
+    "Powered locally by Qwen3 + Ollama"
+)
 
-        st.session_state.document_text = limit_text(extracted_text)
-
-    st.sidebar.success(f"Loaded: {uploaded_file.name}")
-
-    st.sidebar.write(
-        f"{len(st.session_state.document_text):,} characters extracted"
-    )
+st.divider()
 
 
-# NO DOCUMENT
+# NO DOCUMENT SCREEN
 
-if not st.session_state.document_text:
+if not st.session_state.document:
 
-    st.info("Upload a PDF from the sidebar to begin.")
+    st.info("Upload a PDF from the sidebar to get started.")
 
-    st.markdown(
-        """
-### What CognifyAI can do
+    col1, col2, col3 = st.columns(3)
 
-**Summarize**
-Turn long lecture notes into organized study notes.
+    with col1:
+        st.subheader("📝 Summarize")
+        st.write(
+            "Turn lecture notes into concise study material."
+        )
 
-**Generate quizzes**
-Create practice multiple-choice questions automatically.
+    with col2:
+        st.subheader("🎯 Quiz")
+        st.write(
+            "Generate practice questions from your notes."
+        )
 
-**Ask questions**
-Ask questions directly about your uploaded material.
-"""
-    )
+    with col3:
+        st.subheader("💬 Ask")
+        st.write(
+            "Ask questions about your uploaded document."
+        )
 
     st.stop()
 
 
-# MAIN APP TABS
+# MAIN NAVIGATION
 
-summary_tab, quiz_tab, chat_tab, document_tab = st.tabs(
+summary_tab, quiz_tab, chat_tab = st.tabs(
     [
         "📝 Summary",
         "🎯 Quiz",
-        "💬 Ask CognifyAI",
-        "📄 Document"
+        "💬 Ask CognifyAI"
     ]
 )
 
 
-# SUMMARY TAB
+# SUMMARY
 
 with summary_tab:
 
-    st.header("AI Summary")
+    st.header("Study Summary")
 
     st.write(
-        "Generate organized study notes from your uploaded document."
+        "Generate structured notes from your uploaded material."
     )
 
     if st.button(
-        "Generate Summary",
+        "Generate summary",
         type="primary"
     ):
 
-        with st.spinner("CognifyAI is summarizing your notes..."):
+        with st.spinner(
+            "CognifyAI is reading your notes..."
+        ):
 
-            st.session_state.summary = generate_summary(
-                st.session_state.document_text
+            result = generate_summary(
+                st.session_state.document
+            )
+
+        if result:
+
+            st.session_state.summary = result
+
+        else:
+
+            st.error(
+                "CognifyAI couldn't reach the local AI model. "
+                "Make sure Ollama is running."
             )
 
     if st.session_state.summary:
 
-        st.markdown(st.session_state.summary)
+        st.markdown(
+            st.session_state.summary
+        )
 
 
-# QUIZ TAB
+# QUIZ
 
 with quiz_tab:
 
     st.header("Quiz Generator")
 
-    number_of_questions = st.slider(
+    question_count = st.slider(
         "Number of questions",
         min_value=3,
-        max_value=15,
+        max_value=10,
         value=5
     )
 
     if st.button(
-        "Generate Quiz",
+        "Generate quiz",
         type="primary"
     ):
 
-        with st.spinner("Creating your quiz..."):
+        with st.spinner(
+            "Creating your quiz..."
+        ):
 
-            st.session_state.quiz = generate_quiz(
-                st.session_state.document_text,
-                number_of_questions
+            result = generate_quiz(
+                st.session_state.document,
+                question_count
+            )
+
+        if result:
+
+            st.session_state.quiz = result
+
+        else:
+
+            st.error(
+                "CognifyAI couldn't reach the local AI model."
             )
 
     if st.session_state.quiz:
 
-        st.markdown(st.session_state.quiz)
+        st.markdown(
+            st.session_state.quiz
+        )
 
 
-# CHAT TAB
+
+# DOCUMENT CHAT
 
 with chat_tab:
 
-    st.header("Ask CognifyAI")
+    st.header("Ask Your Notes")
 
     st.caption(
-        "Ask questions based on the PDF you uploaded."
+        "Answers are generated using the uploaded document."
     )
 
     for message in st.session_state.messages:
 
-        with st.chat_message(message["role"]):
+        with st.chat_message(
+            message["role"]
+        ):
 
-            st.markdown(message["content"])
+            st.markdown(
+                message["content"]
+            )
 
     question = st.chat_input(
         "Ask something about your notes..."
@@ -364,12 +398,23 @@ with chat_tab:
 
             with st.spinner("Thinking..."):
 
-                answer = answer_document_question(
-                    st.session_state.document_text,
+                answer = answer_question(
+                    st.session_state.document,
                     question
                 )
 
-            st.markdown(answer)
+            if answer:
+
+                st.markdown(answer)
+
+            else:
+
+                answer = (
+                    "I couldn't connect to the local AI model. "
+                    "Make sure Ollama is running."
+                )
+
+                st.error(answer)
 
         st.session_state.messages.append(
             {
@@ -379,18 +424,13 @@ with chat_tab:
         )
 
 
-# DOCUMENT TAB
 
-with document_tab:
+# DEBUG / DOCUMENT VIEW
 
-    st.header("Extracted PDF Text")
-
-    st.caption(
-        "This is the text CognifyAI currently sees from your PDF."
-    )
+with st.expander("View extracted document text"):
 
     st.text_area(
-        "Document content",
-        st.session_state.document_text,
-        height=600
+        "Extracted text",
+        st.session_state.document,
+        height=300
     )
