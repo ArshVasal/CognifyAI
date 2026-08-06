@@ -1,6 +1,7 @@
+import numpy as np
+import ollama
 import streamlit as st
 from pypdf import PdfReader
-import ollama
 
 
 # APP CONFIGURATION
@@ -12,14 +13,22 @@ st.set_page_config(
 )
 
 
-# AI CONFIGURATION
+# MODEL CONFIGURATION
 
-MODEL_NAME = "qwen3:1.7b"
+LLM_MODEL = "qwen3:1.7b"
+EMBEDDING_MODEL = "nomic-embed-text"
+
+
+# AI GENERATION
 
 def ask_ai(system_prompt, user_prompt):
+    """
+    Send retrieved context and a prompt to the local Qwen model.
+    """
+
     try:
         response = ollama.chat(
-            model=MODEL_NAME,
+            model=LLM_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -36,15 +45,18 @@ def ask_ai(system_prompt, user_prompt):
         return response["message"]["content"]
 
     except Exception as error:
-        st.error(f"Ollama error: {error}")
+        st.error(f"Local AI error: {error}")
         return None
 
 
 # PDF PROCESSING
 
-def extract_text_from_pdf(file):
+def extract_pages_from_pdf(file):
     """
-    Extract text from every readable page of an uploaded PDF.
+    Extract text while preserving the page number.
+
+    Returning page information is useful because retrieved chunks
+    can later be shown as sources.
     """
 
     reader = PdfReader(file)
@@ -55,108 +67,390 @@ def extract_text_from_pdf(file):
 
         text = page.extract_text()
 
-        if text:
+        if text and text.strip():
             pages.append(
-                f"\n--- Page {page_number} ---\n{text}"
+                {
+                    "page": page_number,
+                    "text": text.strip()
+                }
             )
 
-    return "\n".join(pages)
+    return pages
 
 
-def limit_document_size(text, max_characters=5000):
+# CHUNKING
+
+def chunk_document(pages, chunk_size=1000, overlap=150):
     """
-    Prevent extremely large documents from being sent
-    directly to the local model.
+    Split PDF text into smaller overlapping chunks.
 
-    Proper RAG would replace this in a future version.
+    chunk_size:
+        Maximum number of characters in each chunk.
+
+    overlap:
+        Number of characters shared between neighbouring chunks.
+
+    The overlap helps avoid losing information that falls
+    directly on a chunk boundary.
     """
 
-    if len(text) > max_characters:
-        return text[:max_characters]
+    chunks = []
 
-    return text
+    for page in pages:
+
+        text = page["text"]
+        page_number = page["page"]
+
+        start = 0
+
+        while start < len(text):
+
+            end = start + chunk_size
+
+            chunk_text = text[start:end].strip()
+
+            if chunk_text:
+
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "page": page_number
+                    }
+                )
+
+            start += chunk_size - overlap
+
+    return chunks
 
 
-# AI FEATURES
+# EMBEDDINGS
 
-# AI FEATURES
+def create_embeddings(chunks):
+    """
+    Convert all document chunks into numerical vectors.
 
-def generate_summary(document):
+    Similar pieces of text should have vectors that point
+    in similar directions in embedding space.
+    """
+
+    texts = [
+        chunk["text"]
+        for chunk in chunks
+    ]
+
+    try:
+
+        response = ollama.embed(
+            model=EMBEDDING_MODEL,
+            input=texts
+        )
+
+        return np.array(
+            response["embeddings"],
+            dtype=np.float32
+        )
+
+    except Exception as error:
+
+        st.error(
+            f"Embedding error: {error}"
+        )
+
+        return None
+
+
+def embed_query(question):
+    """
+    Convert the user's question into an embedding using
+    the same embedding model as the document chunks.
+    """
+
+    try:
+
+        response = ollama.embed(
+            model=EMBEDDING_MODEL,
+            input=question
+        )
+
+        return np.array(
+            response["embeddings"][0],
+            dtype=np.float32
+        )
+
+    except Exception as error:
+
+        st.error(
+            f"Query embedding error: {error}"
+        )
+
+        return None
+
+
+# VECTOR SIMILARITY
+
+def cosine_similarity(query_vector, document_vectors):
+    """
+    Measure semantic similarity between the user's question
+    and each document chunk.
+
+    Higher score = more semantically similar.
+    """
+
+    query_norm = np.linalg.norm(query_vector)
+
+    document_norms = np.linalg.norm(
+        document_vectors,
+        axis=1
+    )
+
+    denominator = (
+        document_norms * query_norm
+    )
+
+    denominator[
+        denominator == 0
+    ] = 1e-10
+
+    scores = np.dot(
+        document_vectors,
+        query_vector
+    ) / denominator
+
+    return scores
+
+
+# RETRIEVAL
+
+def retrieve_relevant_chunks(
+    question,
+    chunks,
+    chunk_embeddings,
+    top_k=3
+):
+    """
+    Embed the question and retrieve the document chunks with
+    the highest cosine similarity.
+    """
+
+    question_embedding = embed_query(
+        question
+    )
+
+    if question_embedding is None:
+        return []
+
+    scores = cosine_similarity(
+        question_embedding,
+        chunk_embeddings
+    )
+
+    top_indices = np.argsort(
+        scores
+    )[::-1][:top_k]
+
+    results = []
+
+    for index in top_indices:
+
+        results.append(
+            {
+                "text": chunks[index]["text"],
+                "page": chunks[index]["page"],
+                "score": float(scores[index])
+            }
+        )
+
+    return results
+
+
+# RAG QUESTION ANSWERING
+
+def answer_question_with_rag(
+    question,
+    chunks,
+    chunk_embeddings
+):
+    """
+    Complete RAG pipeline:
+
+    Question
+        ↓
+    Query embedding
+        ↓
+    Semantic retrieval
+        ↓
+    Relevant chunks
+        ↓
+    LLM
+        ↓
+    Grounded answer
+    """
+
+    relevant_chunks = retrieve_relevant_chunks(
+        question,
+        chunks,
+        chunk_embeddings,
+        top_k=3
+    )
+
+    if not relevant_chunks:
+
+        return None, []
+
+    context_parts = []
+
+    for chunk in relevant_chunks:
+
+        context_parts.append(
+            f"""
+SOURCE PAGE {chunk["page"]}
+
+{chunk["text"]}
+"""
+        )
+
+    context = "\n\n".join(
+        context_parts
+    )
+
+    system_prompt = """
+You are CognifyAI, a study assistant that answers
+questions using retrieved course material.
+
+Rules:
+
+- Answer using ONLY the retrieved context.
+- Do not invent facts.
+- If the retrieved context does not contain enough
+  information, say that you cannot find the answer
+  in the uploaded document.
+- Keep the answer concise and clear.
+- Mention relevant page numbers when useful.
+"""
+
+    user_prompt = f"""
+RETRIEVED CONTEXT:
+
+{context}
+
+USER QUESTION:
+
+{question}
+"""
+
+    answer = ask_ai(
+        system_prompt,
+        user_prompt
+    )
+
+    return answer, relevant_chunks
+
+
+# SUMMARY
+
+def generate_summary(document_text):
+    """
+    Summary generation is separate from RAG because summarization
+    usually needs broader document context rather than retrieval
+    for one specific question.
+    """
+
+    max_characters = 5000
+
+    document_text = document_text[
+        :max_characters
+    ]
+
     system_prompt = """
 You are CognifyAI, an AI study assistant.
 
-Summarize the provided study material briefly.
+Summarize the provided course material.
 
 Rules:
-- Use only information from the document.
-- Focus on the 5 most important points.
-- Keep the answer concise.
+
+- Use only the document.
+- Identify the five most important ideas.
+- Keep the response concise.
 - Use bullet points.
 - Do not invent information.
 """
 
     user_prompt = f"""
-Summarize this study material:
-
 DOCUMENT:
 
-{document}
+{document_text}
+
+Create a concise study summary.
 """
 
-    return ask_ai(system_prompt, user_prompt)
+    return ask_ai(
+        system_prompt,
+        user_prompt
+    )
 
 
-def generate_quiz(document, question_count):
+# QUIZ
+
+def generate_quiz(
+    document_text,
+    question_count
+):
+    """
+    Generate practice questions from a limited portion
+    of the uploaded document.
+    """
+
+    document_text = document_text[
+        :5000
+    ]
+
     system_prompt = """
 You are CognifyAI, an AI study assistant.
 
-Create a short multiple-choice quiz using only the provided document.
+Create multiple-choice questions using only the
+provided course material.
 
-For each question provide:
-- Question
-- Four choices: A, B, C, D
-- Correct answer
-- Short explanation
+For every question include:
+
+Question
+A. option
+B. option
+C. option
+D. option
+
+Correct Answer: X
+
+Explanation: short explanation
+
+Do not invent information.
 """
 
     user_prompt = f"""
-Create {question_count} multiple-choice questions.
+Create {question_count} multiple-choice questions
+using this material:
 
-DOCUMENT:
-
-{document}
+{document_text}
 """
 
-    return ask_ai(system_prompt, user_prompt)
-
-
-def answer_question(document, question):
-    system_prompt = """
-You are CognifyAI, a document question-answering assistant.
-
-Answer using only the provided document.
-
-Keep the answer concise.
-If the document does not contain the answer, say so.
-"""
-
-    user_prompt = f"""
-DOCUMENT:
-
-{document}
-
-QUESTION:
-
-{question}
-"""
-
-    return ask_ai(system_prompt, user_prompt)
+    return ask_ai(
+        system_prompt,
+        user_prompt
+    )
 
 
 # SESSION STATE
 
-if "document" not in st.session_state:
-    st.session_state.document = ""
+if "pages" not in st.session_state:
+    st.session_state.pages = []
+
+if "document_text" not in st.session_state:
+    st.session_state.document_text = ""
+
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
+
+if "chunk_embeddings" not in st.session_state:
+    st.session_state.chunk_embeddings = None
 
 if "summary" not in st.session_state:
     st.session_state.summary = ""
@@ -167,6 +461,9 @@ if "quiz" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "current_file" not in st.session_state:
+    st.session_state.current_file = None
+
 
 # SIDEBAR
 
@@ -174,7 +471,9 @@ with st.sidebar:
 
     st.title("🧠 CognifyAI")
 
-    st.caption("Local AI study assistant")
+    st.caption(
+        "Local RAG study assistant"
+    )
 
     st.divider()
 
@@ -183,35 +482,108 @@ with st.sidebar:
         type=["pdf"]
     )
 
-    if uploaded_file:
+    if uploaded_file is not None:
 
-        with st.spinner("Reading document..."):
+        if (
+            st.session_state.current_file
+            != uploaded_file.name
+        ):
 
-            extracted_text = extract_text_from_pdf(
-                uploaded_file
-            )
+            with st.spinner(
+                "Processing document..."
+            ):
 
-            st.session_state.document = limit_document_size(
-                extracted_text
-            )
+                pages = extract_pages_from_pdf(
+                    uploaded_file
+                )
 
-        st.success(f"Loaded {uploaded_file.name}")
+                document_text = "\n\n".join(
+                    page["text"]
+                    for page in pages
+                )
+
+                chunks = chunk_document(
+                    pages
+                )
+
+                embeddings = create_embeddings(
+                    chunks
+                )
+
+                if embeddings is not None:
+
+                    st.session_state.pages = pages
+
+                    st.session_state.document_text = (
+                        document_text
+                    )
+
+                    st.session_state.chunks = chunks
+
+                    st.session_state.chunk_embeddings = (
+                        embeddings
+                    )
+
+                    st.session_state.current_file = (
+                        uploaded_file.name
+                    )
+
+                    st.session_state.summary = ""
+                    st.session_state.quiz = ""
+                    st.session_state.messages = []
+
+            if (
+                st.session_state.chunk_embeddings
+                is not None
+            ):
+
+                st.success(
+                    f"Loaded {uploaded_file.name}"
+                )
+
+    if st.session_state.chunks:
 
         st.caption(
-            f"{len(st.session_state.document):,} characters processed"
+            f"{len(st.session_state.pages)} pages"
+        )
+
+        st.caption(
+            f"{len(st.session_state.chunks)} chunks"
+        )
+
+        st.caption(
+            f"{len(st.session_state.document_text):,} characters"
         )
 
     st.divider()
 
-    st.caption(f"AI Model: {MODEL_NAME}")
-    st.caption("Runs locally with Ollama")
+    st.caption(
+        f"LLM: {LLM_MODEL}"
+    )
 
-    if st.button("Clear session"):
+    st.caption(
+        f"Embeddings: {EMBEDDING_MODEL}"
+    )
 
-        st.session_state.document = ""
+    st.caption(
+        "Runs locally with Ollama"
+    )
+
+    if st.button(
+        "Clear session"
+    ):
+
+        st.session_state.pages = []
+        st.session_state.document_text = ""
+        st.session_state.chunks = []
+
+        st.session_state.chunk_embeddings = None
+
         st.session_state.summary = ""
         st.session_state.quiz = ""
         st.session_state.messages = []
+
+        st.session_state.current_file = None
 
         st.rerun()
 
@@ -225,36 +597,48 @@ st.subheader(
 )
 
 st.caption(
-    "Powered locally by Qwen3 + Ollama"
+    "Local RAG pipeline powered by Qwen3 + Ollama"
 )
 
 st.divider()
 
 
-# NO DOCUMENT SCREEN
+# EMPTY STATE
 
-if not st.session_state.document:
+if (
+    not st.session_state.chunks
+    or st.session_state.chunk_embeddings
+    is None
+):
 
-    st.info("Upload a PDF from the sidebar to get started.")
+    st.info(
+        "Upload a PDF from the sidebar to get started."
+    )
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
+
         st.subheader("📝 Summarize")
+
         st.write(
             "Turn lecture notes into concise study material."
         )
 
     with col2:
+
         st.subheader("🎯 Quiz")
+
         st.write(
             "Generate practice questions from your notes."
         )
 
     with col3:
-        st.subheader("💬 Ask")
+
+        st.subheader("🔎 Ask")
+
         st.write(
-            "Ask questions about your uploaded document."
+            "Retrieve relevant material and ask questions."
         )
 
     st.stop()
@@ -266,19 +650,17 @@ summary_tab, quiz_tab, chat_tab = st.tabs(
     [
         "📝 Summary",
         "🎯 Quiz",
-        "💬 Ask CognifyAI"
+        "🔎 Ask CognifyAI"
     ]
 )
 
 
-# SUMMARY
+# SUMMARY TAB
 
 with summary_tab:
 
-    st.header("Study Summary")
-
-    st.write(
-        "Generate structured notes from your uploaded material."
+    st.header(
+        "Study Summary"
     )
 
     if st.button(
@@ -287,22 +669,17 @@ with summary_tab:
     ):
 
         with st.spinner(
-            "CognifyAI is reading your notes..."
+            "Generating summary..."
         ):
 
             result = generate_summary(
-                st.session_state.document
+                st.session_state.document_text
             )
 
         if result:
 
-            st.session_state.summary = result
-
-        else:
-
-            st.error(
-                "CognifyAI couldn't reach the local AI model. "
-                "Make sure Ollama is running."
+            st.session_state.summary = (
+                result
             )
 
     if st.session_state.summary:
@@ -312,11 +689,13 @@ with summary_tab:
         )
 
 
-# QUIZ
+# QUIZ TAB
 
 with quiz_tab:
 
-    st.header("Quiz Generator")
+    st.header(
+        "Quiz Generator"
+    )
 
     question_count = st.slider(
         "Number of questions",
@@ -331,22 +710,18 @@ with quiz_tab:
     ):
 
         with st.spinner(
-            "Creating your quiz..."
+            "Creating quiz..."
         ):
 
             result = generate_quiz(
-                st.session_state.document,
+                st.session_state.document_text,
                 question_count
             )
 
         if result:
 
-            st.session_state.quiz = result
-
-        else:
-
-            st.error(
-                "CognifyAI couldn't reach the local AI model."
+            st.session_state.quiz = (
+                result
             )
 
     if st.session_state.quiz:
@@ -356,15 +731,16 @@ with quiz_tab:
         )
 
 
-
-# DOCUMENT CHAT
+# RAG CHAT TAB
 
 with chat_tab:
 
-    st.header("Ask Your Notes")
+    st.header(
+        "Ask Your Notes"
+    )
 
     st.caption(
-        "Answers are generated using the uploaded document."
+        "Questions use embedding-based semantic retrieval."
     )
 
     for message in st.session_state.messages:
@@ -390,28 +766,62 @@ with chat_tab:
             }
         )
 
-        with st.chat_message("user"):
+        with st.chat_message(
+            "user"
+        ):
 
-            st.markdown(question)
+            st.markdown(
+                question
+            )
 
-        with st.chat_message("assistant"):
+        with st.chat_message(
+            "assistant"
+        ):
 
-            with st.spinner("Thinking..."):
+            with st.spinner(
+                "Searching your notes..."
+            ):
 
-                answer = answer_question(
-                    st.session_state.document,
-                    question
+                answer, sources = (
+                    answer_question_with_rag(
+                        question,
+                        st.session_state.chunks,
+                        st.session_state.chunk_embeddings
+                    )
                 )
 
             if answer:
 
                 st.markdown(answer)
 
+                with st.expander(
+                    "Retrieved sources"
+                ):
+
+                    for number, source in enumerate(
+                        sources,
+                        start=1
+                    ):
+
+                        st.markdown(
+                            f"""
+**Source {number} — Page {source["page"]}**
+
+Similarity score:
+`{source["score"]:.3f}`
+"""
+                        )
+
+                        st.write(
+                            source["text"]
+                        )
+
+                        st.divider()
+
             else:
 
                 answer = (
-                    "I couldn't connect to the local AI model. "
-                    "Make sure Ollama is running."
+                    "I couldn't generate an answer."
                 )
 
                 st.error(answer)
@@ -424,13 +834,24 @@ with chat_tab:
         )
 
 
+# RAG DETAILS
 
-# DEBUG / DOCUMENT VIEW
+with st.expander(
+    "RAG pipeline details"
+):
 
-with st.expander("View extracted document text"):
+    st.write(
+        f"""
+**Pages extracted:** {len(st.session_state.pages)}
 
-    st.text_area(
-        "Extracted text",
-        st.session_state.document,
-        height=300
+**Chunks created:** {len(st.session_state.chunks)}
+
+**Embedding model:** {EMBEDDING_MODEL}
+
+**Generation model:** {LLM_MODEL}
+
+**Retrieval method:** Cosine similarity
+
+**Top chunks retrieved per question:** 3
+"""
     )
