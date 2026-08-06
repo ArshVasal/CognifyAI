@@ -64,7 +64,25 @@ def ask_ai(instructions, user_message):
         return response.output_text
 
     except Exception as error:
-        return f"AI request failed: {error}"
+
+        error_message = str(error)
+
+        if "credit_balance_exhausted" in error_message:
+            return (
+                "⚠️ The cloud AI service is currently unavailable. "
+                "Switch to the local AI provider or try again later."
+            )
+
+        if "invalid_api_key" in error_message:
+            return (
+                "⚠️ The AI service could not authenticate. "
+                "Please check the API configuration."
+            )
+
+        return (
+            "⚠️ CognifyAI couldn't complete the request right now. "
+            "Please try again."
+        )
 
 
 def generate_summary(document_text):
